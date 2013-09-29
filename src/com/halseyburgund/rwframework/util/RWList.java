@@ -2,7 +2,7 @@
     ROUNDWARE
 	a participatory, location-aware media platform
 	Android client library
-   	Copyright (C) 2008-2012 Halsey Solutions, LLC
+   	Copyright (C) 2008-2013 Halsey Solutions, LLC
 	with contributions by Rob Knapen (shuffledbits.com) and Dan Latham
 	http://roundware.org | contact@roundware.org
 
@@ -25,8 +25,13 @@ import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
 
+import org.json.JSONArray;
+import org.json.JSONException;
+import org.json.JSONObject;
+
 import android.content.SharedPreferences;
 import android.content.SharedPreferences.Editor;
+import android.net.Uri;
 import android.util.Log;
 
 import com.halseyburgund.rwframework.core.RWTags;
@@ -49,8 +54,12 @@ public class RWList extends ArrayList<RWListItem> {
     // debugging
     private final static String TAG = "RWList";
     private final static boolean D = false;
+
+	// json parsing error message
+	private final static String JSON_SYNTAX_ERROR_MESSAGE = "Invalid JSON data!";
     
     // fields
+    private RWTags mTags;
     private int mMinSelectionRequired = 1;
     private int mMaxSelectionAllowed = 1;
     
@@ -60,6 +69,7 @@ public class RWList extends ArrayList<RWListItem> {
      */
     public RWList() {
     	super();
+    	mTags = new RWTags();
     }
     
     
@@ -83,8 +93,10 @@ public class RWList extends ArrayList<RWListItem> {
      * @param tags to initialize the list with
      */
     public void initFromTags(RWTags tags) {
+    	mTags = new RWTags();
     	clear();
     	if (tags != null) {
+    		mTags.fromJson(tags.toJsonString(), tags.getDataSource());
     		for (RWTag tag : tags.getTags()) {
     			if (tag.options != null) {
     				// assume options are already in the right order
@@ -103,6 +115,121 @@ public class RWList extends ArrayList<RWListItem> {
 	    	mMaxSelectionAllowed = this.size();
     	}
     }
+    
+    
+    /**
+     * Creates text to be inserted into a Roundware html page for display
+     * in a webview. Typically a marker (e.g. %roundware_tags%) in the html
+     * will indicate the place for inserting this string. The text created
+     * is an assignment of the json data for the tags used by this list to
+     * a Roundware.tags variable. The defaults for each tag will be set to
+     * the current selected options in the list. 
+     * 
+     * @param type (e.g. "listen", "speak") to create json data for
+     * @return string with JavaScript Roundware.tags assignment
+     */
+	public String toJsonForWebView(String type) {
+		if (mTags != null) {
+			// create json from tags (with original defaults)
+			JSONObject root = mTags.toJson();
+			
+			// overwrite defaults with current selected options
+			try {
+				JSONArray entries = root.getJSONArray(type);
+				if (entries != null) {
+			        for (int i = 0; i < entries.length(); i++) {
+			        	JSONObject jsonObj = entries.getJSONObject(i);
+			        	
+			        	String tagCode = jsonObj.optString(RWTags.JSON_KEY_TAG_CODE);
+			        	// String tagSelect = jsonObj.getString(RWTags.JSON_KEY_TAG_SELECTION_TYPE);
+	
+						JSONArray newDefaults = new JSONArray();
+				
+						for (RWListItem item : this) {
+							RWTag tag = item.getTag();
+							if (tag.code.equals(tagCode) && item.isOn()) {
+								newDefaults.put(item.getTagId());
+							}
+						}
+						
+						jsonObj.put(RWTags.JSON_KEY_TAG_DEFAULT_OPTIONS, newDefaults);
+					}
+				}
+				return "Roundware.tags = " + root.toString() + ";";
+			} catch (JSONException e) {
+				Log.e(TAG, JSON_SYNTAX_ERROR_MESSAGE + " - " + e.getMessage());
+			}
+		}
+
+		return "Roundware.tags = {}";
+	}
+	
+	
+	/**
+	 * Deciphers the Roundware information in the specified URI and uses it
+	 * to update the selection state of the tags options. The URI is expected
+	 * to have a format like:
+	 * 
+	 * roundware://project?demographic=35,36&question=38,40[&done=true]
+	 * 
+	 * @param webViewMessageUri to process and set selection from
+	 * @return true when the uri contains done=true, false otherwise
+	 */
+	public boolean setSelectionFromWebViewMessageUri(Uri webViewMessageUri) {
+		boolean done = false;
+
+        // set all tags to off
+        for (RWListItem item : this) {
+            item.setOff();
+        }
+
+        // process the url
+        String query = webViewMessageUri.getQuery(); // everything after ? to #
+		if ((query != null) && (query.length() > 0)) {
+			String[] parameters = query.split("&");
+			for (String parameter : parameters) {
+				if (parameter.lastIndexOf("=") < 0) {
+					break;
+				}
+				
+				String parameterName = parameter.substring(0, parameter.lastIndexOf("="));
+				String parameterValues = parameter.substring(parameter.lastIndexOf("=") + 1);
+				if (D) { Log.d(TAG, "Parameter name: " + parameterName + " values: " + parameterValues); }
+
+				if ((parameterName == null) || (parameterName.length() == 0)) {
+					break;
+				}
+
+				String values[];
+				if ((parameterValues != null) && (parameterValues.length() >= 0)) {
+					values = parameterValues.split(",");
+				} else {
+					values = new String[]{};
+				}
+				
+				// check done parameter
+				if ("done".equalsIgnoreCase(parameterName) && (values.length > 0) && ("true".equalsIgnoreCase(values[0]))) {
+					done = true;
+					break;
+				}
+
+                // check tags
+				for (RWListItem item : this) {
+					RWTag tag = item.getTag();
+					String tagId = String.valueOf(item.getTagId());
+					if (tag.code.equals(parameterName)) {
+						for (String value : values) {
+							if (tagId.equals(value)) {
+								item.setOn();
+								break;
+							}
+						}
+					}
+				}
+			}
+		}
+		return done;
+	}
 
     
     /**

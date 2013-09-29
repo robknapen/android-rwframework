@@ -7,6 +7,10 @@
     <string name="rw_spec_server_url">http://rwdev.dyndns.org/roundware/</string>
     <string name="rw_spec_project_id">1</string>
     <string name="rw_spec_heartbeat_interval_in_sec">30</string>
+    
+    <string name="rw_spec_files_url"></string>
+    <string name="rw_spec_files_version">0</string>
+    <string name="rw_spec_files_always_download">N</string>
 
     <string name="rw_spec_queue_check_interval_in_sec">10</string>
     <string name="rw_spec_queued_file_basename">note</string>
@@ -22,10 +26,11 @@
 
     <string name="rw_spec_min_location_update_time_msec">60000</string>
     <string name="rw_spec_min_location_update_distance_meters">5</string>
-    	
+    <string name="rw_spec_use_gps_if_possible">N</string>
+
 	<string name="rw_spec_stream_metadata_enabled_yn">N</string>
 	<string name="rw_spec_stream_metadata_timer_interval_in_msec">1000</string>
-	
+
 	<string name="rw_spec_reset_tag_defaults_on_startup_yn">Y</string>    
 		
     <string name="rw_spec_static_soundtrack_session_id">-1</string>

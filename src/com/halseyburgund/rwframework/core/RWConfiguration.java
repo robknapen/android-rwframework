@@ -2,7 +2,7 @@
     ROUNDWARE
 	a participatory, location-aware media platform
 	Android client library
-   	Copyright (C) 2008-2012 Halsey Solutions, LLC
+   	Copyright (C) 2008-2013 Halsey Solutions, LLC
 	with contributions by Rob Knapen (shuffledbits.com) and Dan Latham
 	http://roundware.org | contact@roundware.org
 
@@ -74,6 +74,8 @@ public class RWConfiguration {
 	private final static String JSON_KEY_CONFIG_GEO_SPEAK_ENABLED = "geo_speak_enabled";
 	private final static String JSON_KEY_CONFIG_LISTEN_ENABLED = "listen_enabled";
 	private final static String JSON_KEY_CONFIG_SPEAK_ENABLED = "speak_enabled";
+	private final static String JSON_KEY_CONFIG_FILES_URL = "files_url";
+	private final static String JSON_KEY_CONFIG_FILES_VERSION = "files_version";
 	
 	private final static String JSON_KEY_CONFIG_SECTION_SERVER = "server";
 	private final static String JSON_KEY_CONFIG_CURRENT_VERSION = "version";
@@ -83,6 +85,7 @@ public class RWConfiguration {
 	private final static String JSON_KEY_CONFIG_RESET_TAG_DEFAULTS_ON_STARTUP = "reset_tag_defaults_on_startup";
 	private final static String JSON_KEY_CONFIG_MIN_LOCATION_UPDATE_TIME_MSEC = "min_location_update_time_msec";
 	private final static String JSON_KEY_CONFIG_MIN_LOCATION_UPDATE_DISTANCE_METER = "min_location_update_distance_meter";
+    private final static String JSON_KEY_CONFIG_USE_GPS_IF_POSSIBLE = "use_gps_if_possible";
 	private final static String JSON_KEY_CONFIG_HTTP_TIMEOUT_SEC = "http_timeout_sec";
 	
 	// json parsing error message
@@ -95,12 +98,19 @@ public class RWConfiguration {
 	
 	private String mSessionId = null;
 	private String mProjectName = null;
+
+	// (web) content file management
+	private String mContentFilesUrl = null;
+	private int mContentFilesVersion = -1;
+	private boolean mContentFilesAlwaysDownload = false;
 	
+	// timing variables
 	private int mHeartbeatTimerSec = 15;
 	private int mQueueCheckIntervalSec = 60;
 	private int mStreamMetadataTimerIntervalMSec = 2000;
 	private int mMaxRecordingTimeSec = 30;
 	
+	// social sharing
 	private String mSharingUrl = null;
 	private String mSharingMessage = null;
 	private String mLegalAgreement = null;
@@ -132,9 +142,18 @@ public class RWConfiguration {
 	 */
 	private long mMinLocationUpdateTimeMSec = 60000;
 	private double mMinLocationUpdateDistanceMeter = 5.0;
+
+    /**
+     * Use GPS for location tracking if possible on the device. It needs to be
+     * present and activated for this to work. Using GPS indoors is not a good
+     * idea, since it will have a hard time getting a position fix from the
+     * satellites. If possible stick with lesser accurate WiFi or network
+     * location and do not try to use the GPS.
+     */
+    private boolean mUseGpsIfPossible = false;
 	
 	// http call timeout
-	private int mHttpTimeOutSec = 15;
+	private int mHttpTimeOutSec = 45;
 
 	// current Roundware software version on the server
 	private String mServerVersion = null;
@@ -150,20 +169,30 @@ public class RWConfiguration {
 		// overwrite defaults from resources
 		if (context != null) {
 			String val;
-			val = context.getString(com.halseyburgund.rwframework.R.string.rw_spec_heartbeat_interval_in_sec);
+			val = context.getString(R.string.rw_spec_heartbeat_interval_in_sec);
 			mHeartbeatTimerSec = Integer.valueOf(val);
 			
-			val = context.getString(com.halseyburgund.rwframework.R.string.rw_spec_queue_check_interval_in_sec);
+			val = context.getString(R.string.rw_spec_queue_check_interval_in_sec);
 			mQueueCheckIntervalSec = Integer.valueOf(val);
 			
-			val = context.getString(com.halseyburgund.rwframework.R.string.rw_spec_stream_metadata_timer_interval_in_msec);
+			val = context.getString(R.string.rw_spec_stream_metadata_timer_interval_in_msec);
 			mStreamMetadataTimerIntervalMSec = Integer.valueOf(val);
 			
-			String str = context.getString(R.string.rw_spec_min_location_update_time_msec);
-			mMinLocationUpdateTimeMSec = Long.valueOf(str);
+			val = context.getString(R.string.rw_spec_min_location_update_time_msec);
+			mMinLocationUpdateTimeMSec = Long.valueOf(val);
 
-			str = context.getString(R.string.rw_spec_min_location_update_distance_meters);
-			mMinLocationUpdateDistanceMeter = Double.valueOf(str);
+			val = context.getString(R.string.rw_spec_min_location_update_distance_meters);
+			mMinLocationUpdateDistanceMeter = Double.valueOf(val);
+			
+			val = context.getString(R.string.rw_spec_files_url);
+			mContentFilesUrl = val;
+			
+			val = context.getString(R.string.rw_spec_files_version);
+			if (val != null) {
+				mContentFilesVersion = Integer.valueOf(val);
+			}
+			
+			mContentFilesAlwaysDownload = "Y".equalsIgnoreCase(context.getString(R.string.rw_spec_files_always_download));
 
 			mListenEnabled = "Y".equalsIgnoreCase(context.getString(R.string.rw_spec_listen_enabled_yn));
 			mGeoListenEnabled = "Y".equalsIgnoreCase(context.getString(R.string.rw_spec_geo_listen_enabled_yn));
@@ -171,6 +200,8 @@ public class RWConfiguration {
 			mGeoSpeakEnabled = "Y".equalsIgnoreCase(context.getString(R.string.rw_spec_geo_speak_enabled_yn));
 			mStreamMetadataEnabled = "Y".equalsIgnoreCase(context.getString(R.string.rw_spec_stream_metadata_enabled_yn));
 			mResetTagDefaultsOnStartup = "Y".equalsIgnoreCase(context.getString(R.string.rw_spec_reset_tag_defaults_on_startup_yn));
+
+            mUseGpsIfPossible = "Y".equalsIgnoreCase(context.getString(R.string.rw_spec_use_gps_if_possible));
 		}
 	}
 
@@ -204,6 +235,8 @@ public class RWConfiguration {
 	        		specs = jsonObj.getJSONObject(JSON_KEY_CONFIG_SECTION_PROJECT);
 		        	setProjectId(specs.optString(JSON_KEY_CONFIG_PROJECT_ID, getProjectId()));
 		        	setProjectName(specs.optString(JSON_KEY_CONFIG_PROJECT_NAME, getProjectName()));
+		        	setContentFilesUrl(specs.optString(JSON_KEY_CONFIG_FILES_URL, getContentFilesUrl()));
+		        	setContentFilesVersion(specs.optInt(JSON_KEY_CONFIG_FILES_VERSION, getContentFilesVersion()));
 		        	setHeartbeatTimerSec(specs.optInt(JSON_KEY_CONFIG_HEARTBEAT_TIMER_SEC, getHeartbeatTimerSec()));
 		        	setMaxRecordingTimeSec(specs.optInt(JSON_KEY_CONFIG_MAX_RECORDING_LENGTH_SEC, getMaxRecordingTimeSec()));
 		        	setSharingMessage(specs.optString(JSON_KEY_CONFIG_SHARING_MESSAGE, getSharingMessage()));
@@ -220,6 +253,7 @@ public class RWConfiguration {
 		        	setMinLocationUpdateTimeMSec(specs.optLong(JSON_KEY_CONFIG_MIN_LOCATION_UPDATE_TIME_MSEC, getMinLocationUpdateTimeMSec()));
 		        	setMinLocationUpdateDistanceMeter(specs.optDouble(JSON_KEY_CONFIG_MIN_LOCATION_UPDATE_DISTANCE_METER, getMinLocationUpdateDistanceMeter()));
 		        	setHttpTimeOutSec(specs.optInt(JSON_KEY_CONFIG_HTTP_TIMEOUT_SEC, getHttpTimeOutSec()));
+                    setUseGpsIfPossible(specs.optBoolean(JSON_KEY_CONFIG_USE_GPS_IF_POSSIBLE, getUseGpsIfPossible()));
 	        	} else if (jsonObj.has(JSON_KEY_CONFIG_SECTION_SERVER)) {
 	        		specs = jsonObj.getJSONObject(JSON_KEY_CONFIG_SECTION_SERVER);
 	        		setServerVersion(specs.optString(JSON_KEY_CONFIG_CURRENT_VERSION, getServerVersion()));
@@ -502,6 +536,46 @@ public class RWConfiguration {
 
 	public void setStreamMetadataEnabled(boolean streamMetadataEnabled) {
 		mStreamMetadataEnabled = streamMetadataEnabled;
+	}
+
+
+	public String getContentFilesUrl() {
+		return mContentFilesUrl;
+	}
+
+
+	public void setContentFilesUrl(String filesUrl) {
+		mContentFilesUrl = filesUrl;
+	}
+
+
+	public int getContentFilesVersion() {
+		return mContentFilesVersion;
+	}
+
+
+	public void setContentFilesVersion(int filesVersion) {
+		mContentFilesVersion = filesVersion;
+	}
+
+
+	public boolean isContentFilesAlwaysDownload() {
+		return mContentFilesAlwaysDownload;
+	}
+
+
+    public void setUseGpsIfPossible(boolean useGps) {
+        mUseGpsIfPossible = useGps;
+    }
+
+
+    public boolean getUseGpsIfPossible() {
+        return mUseGpsIfPossible;
+    }
+
+
+	public void setContentFilesAlwaysDownload(boolean contentFilesAlwaysDownload) {
+		mContentFilesAlwaysDownload = contentFilesAlwaysDownload;
 	}
 	
 }

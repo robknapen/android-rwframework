@@ -2,7 +2,7 @@
     ROUNDWARE
 	a participatory, location-aware media platform
 	Android client library
-   	Copyright (C) 2008-2012 Halsey Solutions, LLC
+   	Copyright (C) 2008-2013 Halsey Solutions, LLC
 	with contributions by Rob Knapen (shuffledbits.com) and Dan Latham
 	http://roundware.org | contact@roundware.org
 
@@ -398,7 +398,7 @@ public class RWAction {
      * This might be useful when the action has been created in off-line
      * mode when no envelope ID was known, and it can be added later.
      * 
-     * @param sessionId to set for the action
+     * @param envelopeId to set for the action
      */
     public void setEnvelopeId(String envelopeId) {
     	add(R.string.rw_key_envelope_id, envelopeId);
@@ -513,6 +513,15 @@ public class RWAction {
     }
     
     
+    /**
+     * Gets the selected tags options for this action.
+     * 
+     * This method is a convenience method that uses the keywords defined
+     * in the resources (e.g. rwconfig.xml) to retrieve the value from the
+     * properties.
+     * 
+     * @return String stored for the selected tags options
+     */
     public String getSelectedTagsOptions() {
     	return (String) get(R.string.rw_key_tags);
     }

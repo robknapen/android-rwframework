@@ -2,7 +2,7 @@
     ROUNDWARE
 	a participatory, location-aware media platform
 	Android client library
-   	Copyright (C) 2008-2012 Halsey Solutions, LLC
+   	Copyright (C) 2008-2013 Halsey Solutions, LLC
 	with contributions by Rob Knapen (shuffledbits.com) and Dan Latham
 	http://roundware.org | contact@roundware.org
 
@@ -21,11 +21,15 @@
  */
 package com.halseyburgund.rwframework.core;
 
+import java.io.BufferedReader;
 import java.io.File;
+import java.io.FileReader;
+import java.io.IOException;
 import java.io.PrintWriter;
 import java.io.StringWriter;
 import java.io.Writer;
 import java.net.UnknownHostException;
+import java.util.Locale;
 import java.util.Observable;
 import java.util.Observer;
 import java.util.Timer;
@@ -33,9 +37,13 @@ import java.util.TimerTask;
 
 import org.apache.http.HttpException;
 import org.apache.http.HttpStatus;
+import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
+import org.json.JSONTokener;
 
+import android.annotation.SuppressLint;
+import android.annotation.TargetApi;
 import android.app.Notification;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
@@ -49,10 +57,14 @@ import android.media.AudioManager;
 import android.media.MediaPlayer;
 import android.net.ConnectivityManager;
 import android.net.NetworkInfo;
+import android.net.wifi.WifiManager;
+import android.net.wifi.WifiManager.WifiLock;
 import android.os.AsyncTask;
 import android.os.Binder;
+import android.os.Build;
 import android.os.IBinder;
 import android.os.PowerManager;
+// import android.os.StrictMode;
 import android.util.Log;
 
 import com.halseyburgund.rwframework.R;
@@ -73,11 +85,11 @@ import com.halseyburgund.rwframework.util.RWSharedPrefsHelper;
  * 
  * @author Rob Knapen
  */
-public class RWService extends Service implements Observer {
+@SuppressLint("DefaultLocale") public class RWService extends Service implements Observer {
 	
 	// debugging
 	private final static String TAG = "RWService";
-	private final static boolean D = false;
+	private final static boolean D = true;
 
 	// playback notification
 	private final static int NOTIFICATION_ID = 10001;
@@ -92,8 +104,14 @@ public class RWService extends Service implements Observer {
 		UNINITIALIZED,
 		
 		/**
+		 * RWService session is initializing.
+		 */
+		INITIALIZING,
+		
+		/**
 		 * Session is on-line; project configuration has been retrieved
-		 * and a session ID is available.
+		 * and a session ID is available. When required by the project
+		 * all web content files have been loaded too.
 		 */
 		ON_LINE,
 		
@@ -114,6 +132,7 @@ public class RWService extends Service implements Observer {
 	// fields
 	private RWActionFactory mActionFactory;
 	private MediaPlayer mPlayer;
+	private WifiLock mWifiLock;
 	private Timer mQueueTimer;
 	private long mLastRequestMsec;
 	private long mLastStateChangeMsec;
@@ -127,6 +146,10 @@ public class RWService extends Service implements Observer {
 	private int mNotificationIconId;
 	private Class<?> mNotificationActivity;
 
+	private String mContentFilesLocalDir = null;
+	private boolean mAlwaysDownloadContent = false;
+	private boolean mUseExternalStorageForContent = false;
+	
 	private String mServerUrl;
 	private String mStreamUrl;
 	private boolean mShowDetailedMessages = false;
@@ -141,7 +164,6 @@ public class RWService extends Service implements Observer {
 	
 	private RWConfiguration configuration;
 	private RWTags tags;
-
 	
 	/**
 	 * Service binder used to communicate with the Roundware service.
@@ -249,7 +271,7 @@ public class RWService extends Service implements Observer {
 				Log.w(TAG, "Could not retrieve tags data from server and no cached data available!");
 				broadcast(RW.NO_TAGS);
 			} else {
-				tags.assignFromJsonServerResponse(result, usingCache);
+				tags.fromJson(result, usingCache ? RWTags.FROM_CACHE : RWTags.FROM_SERVER);
 				broadcast(RW.TAGS_LOADED);
 			}
 		}
@@ -304,10 +326,21 @@ public class RWService extends Service implements Observer {
 						mPlayer.setAudioStreamType(AudioManager.STREAM_MUSIC);
 						mPlayer.setDataSource(mStreamUrl);
 						mPlayer.prepareAsync();
+						
+						// get wifi lock, will be released when playback is stopped
+						mWifiLock = ((WifiManager) getSystemService(Context.WIFI_SERVICE))
+							    .createWifiLock(WifiManager.WIFI_MODE_FULL, "roundware_playback_wifilock");
+
+						mWifiLock.setReferenceCounted(false);
+						mWifiLock.acquire();						
 
 						// send log message about stream started
 						rwSendLogEvent(R.string.rw_et_start_listen, null, null, true);
 					} catch (Exception ex) {
+						if (mWifiLock != null) {
+							mWifiLock.release();
+						}
+						
 						Log.e(TAG, ex.toString());
 						broadcast(RW.UNABLE_TO_PLAY);
 
@@ -363,26 +396,37 @@ public class RWService extends Service implements Observer {
 	private BroadcastReceiver rwReceiver = new BroadcastReceiver() {
 		@Override
 		public void onReceive(Context context, Intent intent) {
-			// configuration loaded - switch from uninitialized to on-line or off-line
-			// depending on using server or cached configuration data
+			if (D) { Log.d(TAG, "Received broadcast intent with action: " + intent.getAction()); }
+			
 			if (RW.CONFIGURATION_LOADED.equalsIgnoreCase(intent.getAction())) {
-				if (mSessionState == SessionState.UNINITIALIZED) {
+				if (mSessionState != SessionState.ON_LINE) {
 					if (configuration.getDataSource() != RWConfiguration.FROM_SERVER) {
+						// TODO Check if chached content and tags are available
+						// if so go to off_line state
+						// else go to unitialized state
 						manageSessionState(SessionState.OFF_LINE);
 					} else {
-						manageSessionState(SessionState.ON_LINE);
-					}
-				} else {
-					// refresh tags (now that the session id is known)
-					if (tags.getDataSource() != RWTags.FROM_SERVER) {
-						new RetrieveTagsTask(context, configuration.getProjectId()).execute();
+						if (isContentDownloadRequired(context)) {
+							startContentDownload(context);
+						} else {
+							// otherwise can go to on_line now
+							broadcast(RW.CONTENT_LOADED);
+						}
 					}
 				}
 			} else if (RW.NO_CONFIGURATION.equalsIgnoreCase(intent.getAction())) {
 				// loading configuration failed - switch to uninitialized if needed
-				if (mSessionState != SessionState.UNINITIALIZED) {
-					manageSessionState(SessionState.UNINITIALIZED);
-				}
+				manageSessionState(SessionState.UNINITIALIZED);
+			} else if (RW.CONTENT_LOADED.equalsIgnoreCase(intent.getAction())) {
+				if (mSessionState != SessionState.ON_LINE) {
+					new RetrieveTagsTask(context, configuration.getProjectId()).execute();
+				}				
+			} else if (RW.NO_CONTENT.equalsIgnoreCase(intent.getAction())) {
+				manageSessionState(SessionState.UNINITIALIZED);
+			} else if (RW.TAGS_LOADED.equalsIgnoreCase(intent.getAction())) {
+				manageSessionState(SessionState.ON_LINE);
+			} else if (RW.NO_TAGS.equalsIgnoreCase(intent.getAction())) {
+				manageSessionState(SessionState.UNINITIALIZED);
 			}
 			
 			// operation failed, if due to timeout (UknownHostException) switch to
@@ -417,6 +461,102 @@ public class RWService extends Service implements Observer {
 			}
 		}
 	};
+	
+
+	/**
+	 * Checks if there is any reason to download the content files for the
+	 * app anew.
+	 * 
+	 * @param context
+	 * @return true when downloading content files makes sense
+	 */
+	private boolean isContentDownloadRequired(Context context) {
+		if (D) { Log.d(TAG, "Checking if new content files need to be downloaded"); }
+
+        // configuration does not exist or does not use content files
+		if ((configuration == null) || (configuration.getContentFilesUrl() == null) || (configuration.getContentFilesVersion() < 0)) {
+			return false;
+		}
+		
+		// overrides to always download for testing and debugging
+		if (mAlwaysDownloadContent || configuration.isContentFilesAlwaysDownload() || mContentFilesLocalDir == null) {
+			return true;
+		}
+		
+		// check last downloaded version numbers and file url
+		String filesUrl = configuration.getContentFilesUrl();
+		int filesVersion = configuration.getContentFilesVersion();
+		
+		RWSharedPrefsHelper.ContentFilesInfo currentFileInfo = RWSharedPrefsHelper.loadContentFilesInfo(context, RW.LAST_DOWNLOADED_CONTENT_FILES_INFO);
+		if (currentFileInfo == null) {
+			return true;
+		} else if (currentFileInfo.filesVersion != filesVersion) {
+			return true;
+		} else if ((currentFileInfo.filesUrl == null) || (!currentFileInfo.filesUrl.equals(filesUrl))) {
+			return true;
+		}
+		
+		// check if last downloaded content files are still available
+		// (at least the folder still exists and is not empty)
+		String filesDirName = currentFileInfo.filesStorageDirName;
+		File filesDir = new File(filesDirName);
+		if ((!filesDir.exists()) || (!filesDir.isDirectory()) || (filesDir.list().length == 0)) {
+			return true;
+		}
+		
+		return false;
+	}
+	
+	
+	private void startContentDownload(Context context) {
+		if (D) { Log.d(TAG, "Starting download of new content files"); }
+		
+		// figure out where to store the files
+		final Context ctx = context;
+		File filesDir;
+		
+		if (mUseExternalStorageForContent) {
+			filesDir = ctx.getExternalFilesDir(null);
+		} else {
+			filesDir = ctx.getFilesDir();
+		}
+		final String targetDirName = filesDir.getAbsolutePath();
+
+		// get current content file info from project configuration
+		final String fileUrl = configuration.getContentFilesUrl();
+		final int filesVersion = configuration.getContentFilesVersion();
+
+		// start async task to download and unpack content file
+		new RWZipDownloadingTask(fileUrl, targetDirName, new RWZipDownloadingTask.StateListener() {
+			@Override
+			public void downloadingStarted(long timeStampMsec) {
+				// NOTE: remember this is called from an async background task
+				// void - use for progress indicator if needed
+			}
+
+			@Override
+			public void downloading(long timeStampMsec, long bytesProcessed, long totalBytes) {
+				// NOTE: remember this is called from an async background task
+				// void - use for progress indicator if needed
+			}
+			
+			@Override
+			public void downloadingFinished(long timeStampMsec, String targetDir) {
+				RWSharedPrefsHelper.saveContentFilesInfo(ctx, RW.LAST_DOWNLOADED_CONTENT_FILES_INFO, 
+						new RWSharedPrefsHelper.ContentFilesInfo(fileUrl, filesVersion, targetDir)
+				);
+				mContentFilesLocalDir = targetDir;
+				broadcast(RW.CONTENT_LOADED);
+			}
+			
+			@Override
+			public void downloadingFailed(long timeStampMsec, String errorMessage) {
+				// TODO: pass error message in intent?
+				mContentFilesLocalDir = null;
+				broadcast(RW.NO_CONTENT);
+			}
+		}).execute();
+	}
 	
 	
 	/**
@@ -460,9 +600,13 @@ public class RWService extends Service implements Observer {
 	}
 	
 	
-	@Override
+	@TargetApi(Build.VERSION_CODES.GINGERBREAD)
+    @Override
 	public void onCreate() {
 		super.onCreate();
+
+        // set strict mode usage
+        // StrictMode.setThreadPolicy(new StrictMode.ThreadPolicy.Builder().detectCustomSlowCalls().penaltyLog().build());
 
 		// create default configuration and tags
 		configuration = new RWConfiguration(this);
@@ -484,6 +628,10 @@ public class RWService extends Service implements Observer {
 		IntentFilter filter = createOperationsIntentFilter();
 		filter.addAction(RW.CONFIGURATION_LOADED);
 		filter.addAction(RW.NO_CONFIGURATION);
+		filter.addAction(RW.CONTENT_LOADED);
+		filter.addAction(RW.NO_CONTENT);
+		filter.addAction(RW.TAGS_LOADED);
+		filter.addAction(RW.NO_TAGS);
 		registerReceiver(rwReceiver, filter);
 		
 		// setup for GPS callback
@@ -524,7 +672,8 @@ public class RWService extends Service implements Observer {
 		if ((configuration != null) && (configuration.isUsingLocation())) {
 			RWLocationTracker.instance().startLocationUpdates(
 					configuration.getMinLocationUpdateTimeMSec(), 
-					(float)configuration.getMinLocationUpdateDistanceMeter());
+					(float)configuration.getMinLocationUpdateDistanceMeter(),
+                    configuration.getUseGpsIfPossible());
 		}
 	}
 	
@@ -577,8 +726,8 @@ public class RWService extends Service implements Observer {
 
 		startForeground(NOTIFICATION_ID, mRwNotification);
 
-		// try to go on-line, this will attempt to get the configuration and tags
-		manageSessionState(SessionState.ON_LINE);
+		// start initializing the Roundware session, this will attempt to get the configuration, tags and content
+		manageSessionState(SessionState.INITIALIZING);
 		
 		return Service.START_STICKY;
 	}
@@ -592,6 +741,7 @@ public class RWService extends Service implements Observer {
 	 * @param tags of tags options for the audio
 	 */
 	public void playbackStart(RWList tags) {
+        if (D) { Log.d(TAG, "+++ playbackStart +++"); }
 		if (!isPlaying()) {
 			createPlayer();
 			new StartPlaybackTask(tags).execute();
@@ -629,6 +779,10 @@ public class RWService extends Service implements Observer {
 				mServerUrl = serverUrlOverride;
 			}
 
+			// app web content downloading
+			mAlwaysDownloadContent = intent.getExtras().getBoolean(RW.EXTRA_WEB_CONTENT_ALWAYS_DOWNLOAD, false);
+			mUseExternalStorageForContent = intent.getExtras().getBoolean(RW.EXTRA_WEB_CONTENT_EXTERNAL_STORAGE, false);
+			
 			// notification icon and handling class
 			mNotificationTitle = intent.getExtras().getString(RW.EXTRA_NOTIFICATION_TITLE);
 			if (mNotificationTitle == null) {
@@ -797,6 +951,76 @@ public class RWService extends Service implements Observer {
 	 */
 	public String getStreamUrl() {
 		return mStreamUrl;
+	}
+	
+	
+	/**
+	 * Returns the local directory name where web content files have been
+	 * stored. These files are downloaded from the server for the project
+	 * and contain HTML/CSS/JS content to be displayed in web views for the
+	 * projects' Listen and Speak filters. NULL will be returned if no
+	 * content files are used or when download has failed. The broadcast
+	 * intent NO_CONTENT signals that download of the content files was
+	 * not possible.
+	 * 
+	 * @return path name where content files have been stored
+	 */
+	public String getContentFilesDir() {
+		return mContentFilesLocalDir;
+	}
+
+
+    /**
+     * Reads the specified content file and returns its content as a single
+     * String. Some content files might need further processing, e.g. to
+     * replace markers with specific information. 
+     *
+     * @param contentFileName to read
+     * @return String with content of the file
+     * @throws IOException on error
+     */
+    public String readContentFile(String contentFileName) throws IOException {
+        String data = "";
+        BufferedReader br = new BufferedReader(new FileReader(contentFileName));
+        try {
+            StringBuilder sb = new StringBuilder();
+            String line = br.readLine();
+
+            while (line != null) {
+                sb.append(line);
+                sb.append("\n");
+                line = br.readLine();
+            }
+            data = sb.toString();
+        } finally {
+            br.close();
+        }
+        return data;
+    }
+
+	
+	/**
+	 * Returns true when the framework is set to always download the content
+	 * files when it is required by an app. When not the download of content
+	 * depends on the content files version specified in the configuration of
+	 * the project (i.e. only newer version content will be downloaded).
+	 * 
+	 * @return true when download of web content is forced
+	 */
+	public boolean isContentAlwaysDownloaded() {
+		return mAlwaysDownloadContent;
+	}
+	
+	
+	/**
+	 * Returns true when the framework is set to store content files that are
+	 * downloaded for the app on external storage. Otherwise the more private
+	 * internal storage is used.
+	 * 
+	 * @return true when content files are saved on external storage
+	 */
+	public boolean isContentStoredExternally() {
+		return mUseExternalStorageForContent;
 	}
 
 	
@@ -1416,10 +1640,23 @@ public class RWService extends Service implements Observer {
         
         if (key != null) {
         	try {
-	        	JSONObject jsonObj = new JSONObject(response);
-	        	if (jsonObj.has(key)) {
-	        		return jsonObj.getString(key);
-	        	}
+                Object json = new JSONTokener(response).nextValue();
+                if (json instanceof JSONArray) {
+                    JSONArray entries = (JSONArray) json;
+                    for (int i = 0; i < entries.length(); i++) {
+                        JSONObject jsonObj = entries.getJSONObject(i);
+                        if (D) { Log.d(TAG, jsonObj.toString()); }
+                        if (jsonObj.has(key)) {
+                            return jsonObj.getString(key);
+                        }
+                    }
+                } else if (json instanceof JSONObject) {
+                    JSONObject jsonObj = (JSONObject) json;
+                    if (D) { Log.d(TAG, jsonObj.toString()); }
+                    if (jsonObj.has(key)) {
+                        return jsonObj.getString(key);
+                    }
+                }
         	} catch (JSONException e) {
     			Log.w(TAG, "Could not get server message from response, probably a JSON array instead of a JSON object.");
         	}
@@ -1535,8 +1772,12 @@ public class RWService extends Service implements Observer {
 				mAssetTracker.stop();
 				playbackStop();
 				break;
+			case INITIALIZING:
+				new RetrieveConfigurationTask(this, configuration.getDeviceId(), configuration.getProjectId()).execute();
+				break;
 			case ON_LINE:
 				// refresh configuration after threshold time so session ID can be refreshed
+				// TODO Better to have a task that only updates the session ID?
 				long millis = System.currentTimeMillis();
 				if ((millis - mLastStateChangeMsec) > (configuration.getHeartbeatTimerSec() * 5)) {
 					// project ID assumed to be already in configuration and not changing!
@@ -1576,6 +1817,7 @@ public class RWService extends Service implements Observer {
 	}
 	
 	
+	@SuppressLint("DefaultLocale")
 	private void broadcastActionSuccess(RWAction action, String result) {
 		Intent intent = new Intent();
 		String actionName = RW.BROADCAST_PREFIX + action.getOperation().toLowerCase() + RW.BROADCAST_SUCCESS_POSTFIX;
@@ -1587,6 +1829,7 @@ public class RWService extends Service implements Observer {
 	}
 	
 
+	@SuppressLint("DefaultLocale")
 	private void broadcastActionFailure(RWAction action, String reason, Throwable e) {
 		Intent intent = new Intent();
 		String actionName = RW.BROADCAST_PREFIX + action.getOperation().toLowerCase() + RW.BROADCAST_FAILURE_POSTFIX;
@@ -1601,6 +1844,7 @@ public class RWService extends Service implements Observer {
 	}
 	
 
+	@SuppressLint("DefaultLocale")
 	private void broadcastActionQueued(RWAction action, String reason, Throwable e) {
 		Intent intent = new Intent();
 		String actionName = RW.BROADCAST_PREFIX + action.getOperation().toLowerCase() + RW.BROADCAST_QUEUED_POSTFIX;
@@ -1668,6 +1912,7 @@ public class RWService extends Service implements Observer {
 	 * Creates a media player for sound playback, with initial volume of 0.
 	 */
 	private void createPlayer() {
+        if (D) { Log.d(TAG, "+++ createPlayer +++"); }
 		if (mPlayer == null) {
 			mPlayer = new MediaPlayer();
 			mPlayer.setWakeMode(this, PowerManager.PARTIAL_WAKE_LOCK);
@@ -1740,6 +1985,11 @@ public class RWService extends Service implements Observer {
 			playbackFadeOut();
 			mPlayer.release();
 			mPlayer = null;
+		}
+		
+		// release wifi radio if a lock on it was aquired for playback
+		if (mWifiLock != null) {
+			mWifiLock.release();
 		}
 	}
 
@@ -1817,7 +2067,7 @@ public class RWService extends Service implements Observer {
 	 * @param newVolumeLevel for the music player
 	 * @param fade change level by fading or not
 	 */
-	public void setVolumeLevel(int newVolumeLevel, boolean fade) {
+	@SuppressLint("DefaultLocale") public void setVolumeLevel(int newVolumeLevel, boolean fade) {
 		int oldVolumeLevel = mVolumeLevel;
 		mVolumeLevel = newVolumeLevel;
 		if (mVolumeLevel < mMinVolumeLevel) {
@@ -1837,7 +2087,7 @@ public class RWService extends Service implements Observer {
 		// gradually modify the volume when playing and set to fade
 		if (mPlayer != null) {
 			if (D) {
-				String msg = String.format("Changing volume from level %d (%1.5f) to level %d (%1.5f)", oldVolumeLevel, oldVolume, mVolumeLevel, newVolume);
+				String msg = String.format(Locale.US, "Changing volume from level %d (%1.5f) to level %d (%1.5f)", oldVolumeLevel, oldVolume, mVolumeLevel, newVolume);
 				Log.d(TAG, msg);
 			}
 			if (fade) {
@@ -1857,7 +2107,7 @@ public class RWService extends Service implements Observer {
 			}
 		} else {
 			if (D) {
-				String msg = String.format("Volume set to level %d (%1.5f) but MediaPlayer not initialized!", mVolumeLevel, newVolume);
+				String msg = String.format(Locale.US, "Volume set to level %d (%1.5f) but MediaPlayer not initialized!", mVolumeLevel, newVolume);
 				Log.d(TAG, msg);
 			}
 		}

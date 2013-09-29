@@ -2,7 +2,7 @@
     ROUNDWARE
 	a participatory, location-aware media platform
 	Android client library
-   	Copyright (C) 2008-2012 Halsey Solutions, LLC
+   	Copyright (C) 2008-2013 Halsey Solutions, LLC
 	with contributions by Rob Knapen (shuffledbits.com) and Dan Latham
 	http://roundware.org | contact@roundware.org
 
@@ -46,31 +46,37 @@ public class RWTags {
 
 	// debugging
 	private final static String TAG = "RWTags";
-	// private final static boolean D = false;
+	private final static boolean D = false;
 
 	// data source
 	public final static int DEFAULTS = 0;
 	public final static int FROM_CACHE = 1;
 	public final static int FROM_SERVER = 2;
 	
-	// json names
-	private final static String JSON_KEY_MODE_SPEAK = "speak";
-	private final static String JSON_KEY_MODE_LISTEN = "listen";
-	private final static String JSON_KEY_TAG_CODE = "code";
-	private final static String JSON_KEY_TAG_NAME = "name";
-	private final static String JSON_KEY_TAG_ORDER = "order";
-	private final static String JSON_KEY_TAG_SELECTION_TYPE = "select";
-	private final static String JSON_VALUE_SELECT_SINGLE = "single";
-	// private final static String JSON_VALUE_SELECT_MULTIPLE = "multi";
-	private final static String JSON_VALUE_SELECT_AT_LEAST_ONE = "multi_at_least_one";
-	private final static String JSON_KEY_TAG_DEFAULT_OPTIONS = "defaults";
-	private final static String JSON_KEY_TAG_OPTIONS = "options";
-	private final static String JSON_KEY_TAG_OPTION_ORDER = "order";
-	private final static String JSON_KEY_TAG_OPTION_ID = "tag_id";
-	private final static String JSON_KEY_TAG_OPTION_VALUE = "value";
+	// json keys - tags
+	public final static String JSON_KEY_MODE_SPEAK = "speak";
+	public final static String JSON_KEY_MODE_LISTEN = "listen";
+	public final static String JSON_KEY_TAG_CODE = "code";
+    public final static String JSON_KEY_TAG_HEADER_TEXT = "header_text";
+	public final static String JSON_KEY_TAG_NAME = "name";
+	public final static String JSON_KEY_TAG_ORDER = "order";
+    public final static String JSON_KEY_TAG_DEFAULT_OPTIONS = "defaults";
+
+    // json keys - tag selection types
+    public final static String JSON_KEY_TAG_SELECTION_TYPE = "select";
+	public final static String JSON_VALUE_SELECT_SINGLE = "single";
+	public final static String JSON_VALUE_SELECT_AT_LEAST_ONE = "multi_at_least_one";
+
+    // json keys - tag options
+	public final static String JSON_KEY_TAG_OPTIONS = "options";
+	public final static String JSON_KEY_TAG_OPTION_ORDER = "order";
+	public final static String JSON_KEY_TAG_OPTION_DATA = "data";
+	public final static String JSON_KEY_TAG_OPTION_ID = "tag_id";
+	public final static String JSON_KEY_TAG_OPTION_VALUE = "value";
+    public final static String JSON_KEY_TAG_OPTION_RELATIONSHIPS = "relationships";
 
 	// json parsing error message
-	private final static String JSON_SYNTAX_ERROR_MESSAGE = "Invalid server response received!";
+	private final static String JSON_SYNTAX_ERROR_MESSAGE = "Invalid JSON data!";
 	
 	private int mDataSource = DEFAULTS;
 	
@@ -81,6 +87,7 @@ public class RWTags {
 	public class RWTag {
 		public String code; // e.g. demo, age, ques
 		public String name;
+        public String headerText;
 		public int order;
 		public String select; // e.g. single, multi, multi_at_least_one
 		public String type; // e.g. listen, speak
@@ -180,9 +187,11 @@ public class RWTags {
 	
 	// single option for a tag
 	public class RWOption {
+		public String data;
 		public int order;
 		public int tagId;
 		public String value;
+        public ArrayList<Integer> relatedTagIds = new ArrayList<Integer>();
 		public boolean selectByDefault;
 
 		/* (non-Javadoc)
@@ -210,12 +219,14 @@ public class RWTags {
 	 * unchanged.
 	 * 
 	 * @param jsonResponse to process
-	 * @param fromCache true if using cached data
+	 * @param dataSource of json data (DEFAULTS, FROM_CACHE, FROM_SERVER)
 	 */
-	public void assignFromJsonServerResponse(String jsonResponse, boolean fromCache) {
+	public void fromJson(String jsonResponse, int dataSource) {
 		mAllTags.clear();
-		mDataSource = fromCache ? FROM_CACHE : FROM_SERVER;
-
+		mDataSource = dataSource;
+		
+		if (D) { Log.d(TAG, "Creating tags from json: " + jsonResponse); }
+		
 		try {
 			JSONObject root = new JSONObject(jsonResponse);
 			if (root != null) {
@@ -225,6 +236,97 @@ public class RWTags {
 		} catch (JSONException e) {
 			Log.e(TAG, JSON_SYNTAX_ERROR_MESSAGE, e);
 		}
+	}
+	
+	
+	/**
+	 * Creates a JSON object for the tags data.
+	 *   
+	 * @return JSONObject for tags
+	 */
+	public JSONObject toJson() {
+		JSONArray listenEntries = new JSONArray();
+		JSONArray speakEntries = new JSONArray();
+		
+		// create json data for each tag
+		for (RWTag tag : mAllTags) {
+			JSONObject jsonEntry = new JSONObject();
+			try {
+				// store the basic properties
+				jsonEntry.put(JSON_KEY_TAG_CODE, tag.code);
+				jsonEntry.put(JSON_KEY_TAG_NAME, tag.name);
+                jsonEntry.put(JSON_KEY_TAG_HEADER_TEXT, tag.headerText);
+				jsonEntry.put(JSON_KEY_TAG_ORDER, tag.order);
+				jsonEntry.put(JSON_KEY_TAG_SELECTION_TYPE, tag.select);
+				
+				// parse default options
+				JSONArray defaults = new JSONArray();
+				for (Integer value : tag.defaultOptionsTagIds) {
+					defaults.put(value);
+				}
+				jsonEntry.put(JSON_KEY_TAG_DEFAULT_OPTIONS, defaults);
+				
+				// add data for all RWOptions
+				JSONArray options = new JSONArray();
+				for (RWOption option : tag.options) {
+					JSONObject jsonOption = new JSONObject();
+					jsonOption.put(JSON_KEY_TAG_OPTION_ID, option.tagId);
+					jsonOption.put(JSON_KEY_TAG_OPTION_ORDER, option.order);
+					jsonOption.put(JSON_KEY_TAG_OPTION_DATA, option.data);
+					jsonOption.put(JSON_KEY_TAG_OPTION_VALUE, option.value);
+
+                    // add related tag ids
+                    JSONArray jsonRelatedTagIds = new JSONArray();
+                    for (Integer relatedTagId : option.relatedTagIds) {
+                        jsonRelatedTagIds.put(relatedTagId);
+                    }
+                    jsonOption.put(JSON_KEY_TAG_OPTION_RELATIONSHIPS, jsonRelatedTagIds);
+
+					options.put(jsonOption);
+				}
+				jsonEntry.put(JSON_KEY_TAG_OPTIONS, options);
+				
+			} catch (JSONException e) {
+				Log.e(TAG, JSON_SYNTAX_ERROR_MESSAGE, e);
+			}
+			
+			// store json entry in type specific collections
+			if (JSON_KEY_MODE_LISTEN.equalsIgnoreCase(tag.type)) {
+				listenEntries.put(jsonEntry);
+			}
+			if (JSON_KEY_MODE_SPEAK.equalsIgnoreCase(tag.type)){
+				speakEntries.put(jsonEntry);
+			}
+		}
+		
+		// gather all the entries with a json root object
+		JSONObject root = new JSONObject();
+		try {
+			if (listenEntries.length() > 0) {
+				root.put(JSON_KEY_MODE_LISTEN, listenEntries);
+			}
+			if (speakEntries.length() > 0) {
+				root.put(JSON_KEY_MODE_SPEAK, speakEntries);
+			}
+		} catch (JSONException e) {
+			Log.e(TAG, JSON_SYNTAX_ERROR_MESSAGE, e);
+		}
+
+		return root;
+	}
+	
+	
+	/**
+	 * Creates a String with JSON data for all the tags.
+	 *   
+	 * @return JSON string
+	 */
+	public String toJsonString() {
+		String result = toJson().toString();
+		if (D) {
+			Log.d(TAG, "Created json from tags: " + result);
+		}
+		return result;
 	}
 	
 
@@ -237,14 +339,15 @@ public class RWTags {
 	 * @throws JSONException on parse problems
 	 */
 	private void parseTagsFromJson(String type, JSONObject root) throws JSONException {
-		JSONArray entries = root.getJSONArray(type);
-		if (entries != null) {
+		if (root.has(type)) {
+			JSONArray entries = root.getJSONArray(type);
 	        for (int i = 0; i < entries.length(); i++) {
 	        	JSONObject jsonObj = entries.getJSONObject(i);
 	        	RWTag tag = new RWTag();
 	        	tag.type = type;
 	        	tag.code = jsonObj.optString(JSON_KEY_TAG_CODE);
 	        	tag.name = jsonObj.optString(JSON_KEY_TAG_NAME);
+                tag.headerText = jsonObj.optString(JSON_KEY_TAG_HEADER_TEXT);
 	        	tag.order = jsonObj.optInt(JSON_KEY_TAG_ORDER);
 	        	tag.select = jsonObj.getString(JSON_KEY_TAG_SELECTION_TYPE);
 
@@ -260,9 +363,17 @@ public class RWTags {
 	        		JSONObject option = options.getJSONObject(j);
 	        		RWOption o = new RWOption();
 	        		o.order = option.getInt(JSON_KEY_TAG_OPTION_ORDER);
+	        		o.data = option.getString(JSON_KEY_TAG_OPTION_DATA);
 	        		o.tagId = option.getInt(JSON_KEY_TAG_OPTION_ID);
 	        		o.value = option.getString(JSON_KEY_TAG_OPTION_VALUE);
-	        		
+
+                    // relationships to other tag options (ids)
+                    o.relatedTagIds.clear();
+                    JSONArray relatedTagIds = option.getJSONArray(JSON_KEY_TAG_OPTION_RELATIONSHIPS);
+                    for (int k = 0; k < relatedTagIds.length(); k++) {
+                        o.relatedTagIds.add(relatedTagIds.getInt(k));
+                    }
+
 	        		// check if option needs to be selected by default
 	        		o.selectByDefault = tag.defaultOptionsTagIds.contains(o.tagId);
 

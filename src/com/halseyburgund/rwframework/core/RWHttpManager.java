@@ -2,7 +2,7 @@
     ROUNDWARE
 	a participatory, location-aware media platform
 	Android client library
-   	Copyright (C) 2008-2012 Halsey Solutions, LLC
+   	Copyright (C) 2008-2013 Halsey Solutions, LLC
 	with contributions by Rob Knapen (shuffledbits.com) and Dan Latham
 	http://roundware.org | contact@roundware.org
 
@@ -52,7 +52,7 @@ public class RWHttpManager {
 
     // debugging
     private final static String TAG = "RWHttpManager";
-    private final static boolean D = false;
+    private final static boolean D = true;
 
     private final static String POST_MIME_TYPE = "application/x-www-form-urlencoded";
 
@@ -78,7 +78,7 @@ public class RWHttpManager {
             value = props.get(key).toString();
             uriBuilder.append(key);
             uriBuilder.append('=');
-            uriBuilder.append(java.net.URLEncoder.encode(value));
+            uriBuilder.append(java.net.URLEncoder.encode(value, "UTF-8"));
             if (enumProps.hasMoreElements()) {
                 uriBuilder.append('&');
             }
@@ -168,8 +168,8 @@ public class RWHttpManager {
             return sbResponse.toString();
         }
     }
-
-
+    
+    
     public static String uploadFile(String page, Properties properties, String fileParam, String file, int timeOutSec) throws Exception {
     	if (D) { Log.d(TAG, "Starting upload of file: " + file, null); }
 
@@ -182,7 +182,7 @@ public class RWHttpManager {
             if ("operation".equals(key)) {
 	            uriBuilder.append(key);
 	            uriBuilder.append('=');
-	            uriBuilder.append(java.net.URLEncoder.encode(value));
+	            uriBuilder.append(java.net.URLEncoder.encode(value, "UTF-8"));
 	            break;
             }
         }
